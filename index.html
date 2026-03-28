@@ -806,32 +806,41 @@
       const jobs = [];
       const seenUrls = new Set();
 
+      // Uses curious_coder/linkedin-jobs-scraper ($1/1000 results — free tier covers it)
+      // Input: { urls: [linkedin search URLs], count: number }
+      // Output: [{ title, companyName, location, link, postedAt, description, ... }]
       for (const role of roles) {
         const trimmed = role.trim();
         if (!trimmed) continue;
 
         const kw = encodeURIComponent(trimmed);
         const loc = location ? `&location=${encodeURIComponent(location)}` : '';
-        const urls = [
+        const searchUrls = [
           `https://www.linkedin.com/jobs/search/?keywords=${kw}${loc}&f_TPR=r86400&start=0`,
           `https://www.linkedin.com/jobs/search/?keywords=${kw}${loc}&f_TPR=r86400&start=25`,
         ];
 
         try {
           const resp = await fetch(
-            `https://api.apify.com/v2/acts/${encodeURIComponent('curious_coder~linkedin-jobs-scraper')}/run-sync-get-dataset-items?token=${token}`,
+            `https://api.apify.com/v2/acts/curious_coder~linkedin-jobs-scraper/run-sync-get-dataset-items?token=${token}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ startUrls: urls.map(u => ({ url: u })), maxItems: 50 }),
+              body: JSON.stringify({ urls: searchUrls, count: 50 }),
             }
           );
-          if (!resp.ok) throw new Error(`Apify ${resp.status}`);
+
+          if (!resp.ok) {
+            const errText = await resp.text().catch(() => '');
+            throw new Error(`Apify HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+          }
+
           const items = await resp.json();
+          console.log(`"${trimmed}": got ${items.length} results`);
 
           for (const item of items) {
             const url = item.link || item.url || item.applyUrl || '';
-            if (seenUrls.has(url)) continue;
+            if (!url || seenUrls.has(url)) continue;
             if (!isWithin24h(item.postedAt || item.publishedAt || '')) continue;
             seenUrls.add(url);
 
@@ -1201,7 +1210,7 @@ Return ONLY valid JSON, no markdown:
 
       // Scrape phase
       $progress.style.display = 'block';
-      $progress.textContent = `Scraping LinkedIn for ${roleList.length} role(s)... This takes 1-3 minutes.`;
+      $progress.textContent = `Scraping LinkedIn for ${roleList.length} role(s)... This takes 1-4 minutes per role.`;
       $filters.style.display = 'none';
       $resultsWrap.style.display = 'none';
       $emptyState.style.display = 'none';
@@ -1210,7 +1219,8 @@ Return ONLY valid JSON, no markdown:
         allJobs = await scrapeJobs(roleList, loc, apifyToken);
 
         if (allJobs.length === 0) {
-          $progress.textContent = 'No jobs found. Try different roles or location, or check your Apify token.';
+          $progress.textContent = 'No jobs found. This usually means: (1) You need to "Try" the actor first in Apify Console, or (2) Check your token, or (3) Try broader roles like "Software Engineer".';
+        $progress.style.animation = 'none';
           isRunning = false;
           checkReady();
           return;
