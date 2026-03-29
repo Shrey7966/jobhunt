@@ -611,7 +611,7 @@
         <div class="logo">⚡</div>
         <h1>Job Hunt Agent</h1>
       </div>
-      <p>Scrape LinkedIn → ATS Score → Optimize Resume. All client-side, all free.</p>
+      <p>Scrape LinkedIn + Indeed → ATS Score → Optimize Resume + Cover Letter. All client-side, all free.</p>
     </div>
 
     <!-- FORM -->
@@ -691,6 +691,7 @@
             <tr>
               <th data-sort="title">Job Title</th>
               <th data-sort="company">Company</th>
+              <th>Source</th>
               <th data-sort="location">Location</th>
               <th data-sort="atsScore" class="sorted">ATS Score ↓</th>
               <th>Level</th>
@@ -708,7 +709,7 @@
     </div>
 
     <div class="footer">
-      Resume is parsed locally — it never leaves your browser. ATS scoring via Groq (Llama 3.3 70B, free). LinkedIn scraping via Apify.
+      Resume is parsed locally — it never leaves your browser. ATS scoring via Groq (Llama 3.3 70B, free). Job scraping via LinkedIn + Indeed (Apify). History saved in localStorage (14 days).
     </div>
   </div>
 
@@ -921,6 +922,19 @@
             // Exclude blocked companies
             if (excludeSet.has(company.toLowerCase())) continue;
 
+            // Exclude non-software engineering roles by title
+            const titleLower = title.toLowerCase();
+            const REJECT_TITLES = [
+              'electrical', 'mechanical', 'civil', 'chemical', 'biomedical',
+              'aerospace', 'industrial', 'structural', 'environmental',
+              'petroleum', 'nuclear', 'marine', 'agricultural', 'mining',
+              'hardware', 'pcb', 'circuit', 'vlsi', 'fpga', 'rf engineer',
+              'avionics', 'flight control', 'drone', 'sensor integration',
+              'accounting', 'finance intern', 'marketing intern', 'sales intern',
+              'hr intern', 'legal intern', 'nursing', 'pharmacy', 'dental',
+            ];
+            if (REJECT_TITLES.some(r => titleLower.includes(r))) continue;
+
             // Require at least one keyword if specified
             if (requireList.length > 0) {
               const searchText = `${title} ${desc} ${company}`.toLowerCase();
@@ -936,6 +950,7 @@
               company,
               location: item.location || item.formattedLocation || 'N/A',
               url,
+              source: 'LinkedIn',
               postedAt: item.postedAt || item.publishedAt || 'Recently',
               description: desc,
               experienceLevel: parseExpLevel(desc),
@@ -947,9 +962,79 @@
             });
           }
         } catch (e) {
-          console.error(`Scrape failed for "${trimmed}":`, e);
+          console.error(`LinkedIn scrape failed for "${trimmed}":`, e);
         }
       }
+
+      // ── Indeed scraping (using apify/indeed-scraper or similar free actor) ──
+      // We use the public LinkedIn scraper format for Indeed URLs too
+      for (const role of roles) {
+        const trimmed = role.trim();
+        if (!trimmed) continue;
+
+        try {
+          const query = encodeURIComponent(trimmed);
+          const loc = location ? encodeURIComponent(location) : 'United+States';
+          const indeedUrl = `https://www.indeed.com/jobs?q=${query}&l=${loc}&fromage=1&sort=date`;
+
+          const resp = await fetch(
+            `https://api.apify.com/v2/acts/curious_coder~indeed-scraper/run-sync-get-dataset-items?token=${token}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ urls: [indeedUrl], count: 30 }),
+            }
+          );
+
+          if (!resp.ok) {
+            console.warn(`Indeed scraper not available (${resp.status}), skipping...`);
+            continue;
+          }
+
+          const items = await resp.json();
+          console.log(`Indeed "${trimmed}": got ${items.length} results`);
+
+          for (const item of items) {
+            const url = item.url || item.link || item.applyUrl || '';
+            if (!url || seenUrls.has(url)) continue;
+            seenUrls.add(url);
+
+            const company = item.companyName || item.company || 'Unknown';
+            const title = item.title || item.positionName || 'Untitled';
+            const desc = item.description || '';
+
+            // Apply same filters
+            if (excludeSet.has(company.toLowerCase())) continue;
+            const titleLower = title.toLowerCase();
+            const REJECT_TITLES_IND = ['electrical','mechanical','civil','chemical','biomedical','aerospace','hardware','accounting','finance intern','marketing intern','sales intern','hr intern','nursing'];
+            if (REJECT_TITLES_IND.some(r => titleLower.includes(r))) continue;
+            if (requireList.length > 0) {
+              const searchText = `${title} ${desc} ${company}`.toLowerCase();
+              if (!requireList.some(k => searchText.includes(k))) continue;
+            }
+
+            jobs.push({
+              id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              title,
+              company,
+              location: item.location || 'N/A',
+              url,
+              source: 'Indeed',
+              postedAt: item.postedAt || item.date || 'Recently',
+              description: desc,
+              experienceLevel: parseExpLevel(desc),
+              searchRole: trimmed,
+              atsScore: null,
+              matchTier: null,
+              missingKeywords: [],
+              optimization: null,
+            });
+          }
+        } catch (e) {
+          console.warn(`Indeed scrape failed for "${trimmed}":`, e.message);
+        }
+      }
+
       return jobs;
     }
 
@@ -1043,7 +1128,7 @@ Return ONLY valid JSON, no markdown:
     }
 
     async function optimizeJob(job, resumeTxt, apiKey) {
-      const prompt = `You are an elite career coach and resume optimizer. Analyze the candidate's resume against the job description and provide specific, actionable optimizations.
+      const prompt = `You are an elite career coach, resume optimizer, and cover letter writer. Analyze the candidate's resume against the job description and provide specific, actionable optimizations plus a tailored cover letter.
 
 RESUME:
 ${resumeTxt.slice(0, 3000)}
@@ -1053,14 +1138,15 @@ COMPANY: ${job.company}
 JOB DESCRIPTION:
 ${(job.description || '').slice(0, 3000)}
 
-Return ONLY valid JSON, no markdown:
+Return ONLY valid JSON, no markdown fences:
 {
   "match_score": <0-100>,
   "ats_breakdown": {"skills_match": <0-100>, "experience_match": <0-100>, "title_match": <0-100>},
   "top_3_changes": ["change1","change2","change3"],
   "keywords_to_add": ["kw1","kw2","kw3","kw4","kw5"],
   "rewritten_headline": "<under 15 words>",
-  "rewritten_summary": "<2-3 sentence professional summary>"
+  "rewritten_summary": "<2-3 sentence professional summary>",
+  "cover_letter": "<3-4 paragraph cover letter tailored to this specific role. Address it to Hiring Manager at COMPANY. Mention specific skills from the resume that match the JD. Keep it professional, concise, under 250 words.>"
 }`;
 
       try {
@@ -1148,6 +1234,7 @@ Return ONLY valid JSON, no markdown:
               : ''}
           </td>
           <td class="job-company">${esc(job.company)}</td>
+          <td><span class="level-badge" style="${job.source === 'Indeed' ? 'color:var(--yellow);border-color:rgba(234,179,8,0.3)' : ''}">${esc(job.source || 'LinkedIn')}</span></td>
           <td class="job-location">${esc(job.location)}</td>
           <td>
             ${job.atsScore != null
@@ -1214,7 +1301,7 @@ Return ONLY valid JSON, no markdown:
     // OPTIMIZE PANEL
     // ═══════════════════════════════════════════════════════════
     function showPanel(data) {
-      const { match_score, ats_breakdown, top_3_changes, keywords_to_add, rewritten_headline, rewritten_summary } = data;
+      const { match_score, ats_breakdown, top_3_changes, keywords_to_add, rewritten_headline, rewritten_summary, cover_letter } = data;
 
       function valColor(v) {
         if (v >= 72) return 'var(--green)';
@@ -1277,6 +1364,15 @@ Return ONLY valid JSON, no markdown:
           <div class="panel-section-label">Rewritten Summary</div>
           <div class="panel-text-box">${esc(rewritten_summary)}</div>
           <button class="copy-btn" onclick="navigator.clipboard.writeText(\`${rewritten_summary.replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`)">Copy</button>
+        </div>`;
+      }
+
+      if (cover_letter) {
+        const clSafe = cover_letter.replace(/`/g, '\\`').replace(/\$/g, '\\$').replace(/\n/g, '\\n');
+        html += `<div class="panel-section">
+          <div class="panel-section-label" style="color:var(--accent)">✉ Tailored Cover Letter</div>
+          <div class="panel-text-box" style="white-space:pre-line;border-color:rgba(99,102,241,0.3)">${esc(cover_letter)}</div>
+          <button class="copy-btn" style="margin-top:8px" onclick="navigator.clipboard.writeText(\`${clSafe}\`);this.textContent='Copied!'">Copy Cover Letter</button>
         </div>`;
       }
 
@@ -1376,7 +1472,7 @@ Return ONLY valid JSON, no markdown:
       $progress.style.background = 'var(--accent-glow)';
       $progress.style.borderColor = 'rgba(99,102,241,0.2)';
       $progress.style.color = 'var(--accent)';
-      $progress.textContent = `Scraping LinkedIn for ${roleList.length} role(s) (Internship filter active)... This takes 1-4 minutes per role.`;
+      $progress.textContent = `Scraping LinkedIn + Indeed for ${roleList.length} role(s)... This takes 1-4 minutes per role.`;
       $filters.style.display = 'none';
       $resultsWrap.style.display = 'none';
       $emptyState.style.display = 'none';
@@ -1424,6 +1520,9 @@ Return ONLY valid JSON, no markdown:
         $progress.style.animation = 'none';
         $progress.style.opacity = '1';
 
+        // Save today's results to history
+        saveJobHistory(allJobs);
+
       } catch (e) {
         console.error('Hunt failed:', e);
         $progress.textContent = `Error: ${e.message}`;
@@ -1432,6 +1531,98 @@ Return ONLY valid JSON, no markdown:
       isRunning = false;
       checkReady();
     });
+
+    // ═══════════════════════════════════════════════════════════
+    // DAY-WISE JOB HISTORY (localStorage)
+    // ═══════════════════════════════════════════════════════════
+    function todayKey() {
+      const d = new Date();
+      return `jha_history_${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+
+    function saveJobHistory(jobs) {
+      try {
+        // Save only essential fields to keep localStorage size manageable
+        const slim = jobs.map(j => ({
+          id: j.id, title: j.title, company: j.company, location: j.location,
+          url: j.url, source: j.source || 'LinkedIn', postedAt: j.postedAt,
+          atsScore: j.atsScore, matchTier: j.matchTier, missingKeywords: j.missingKeywords,
+          experienceLevel: j.experienceLevel, searchRole: j.searchRole,
+          description: (j.description || '').slice(0, 500), // truncate to save space
+        }));
+        localStorage.setItem(todayKey(), JSON.stringify(slim));
+
+        // Keep a list of all history dates
+        const dates = getHistoryDates();
+        const today = todayKey().replace('jha_history_', '');
+        if (!dates.includes(today)) {
+          dates.push(today);
+          // Keep only last 14 days
+          while (dates.length > 14) {
+            const old = dates.shift();
+            localStorage.removeItem(`jha_history_${old}`);
+          }
+          localStorage.setItem('jha_history_dates', JSON.stringify(dates));
+        }
+        renderHistoryNav();
+      } catch (e) {
+        console.warn('Could not save history:', e);
+      }
+    }
+
+    function getHistoryDates() {
+      try { return JSON.parse(localStorage.getItem('jha_history_dates') || '[]'); } catch { return []; }
+    }
+
+    function loadJobHistory(dateStr) {
+      try {
+        const data = localStorage.getItem(`jha_history_${dateStr}`);
+        if (!data) return [];
+        return JSON.parse(data);
+      } catch { return []; }
+    }
+
+    function renderHistoryNav() {
+      const dates = getHistoryDates();
+      if (dates.length === 0) return;
+
+      let nav = document.getElementById('history-nav');
+      if (!nav) {
+        nav = document.createElement('div');
+        nav.id = 'history-nav';
+        nav.style.cssText = 'display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;';
+        const filtersEl = document.getElementById('filters');
+        filtersEl.parentNode.insertBefore(nav, filtersEl);
+      }
+
+      const today = todayKey().replace('jha_history_', '');
+      nav.innerHTML = `<span style="font-family:var(--font-mono);font-size:11px;color:var(--text-dim);text-transform:uppercase">History:</span>` +
+        dates.slice().reverse().map(d => {
+          const isToday = d === today;
+          const label = isToday ? 'Today' : d.slice(5); // "MM-DD"
+          return `<button class="filter-btn ${isToday ? 'active' : ''}" data-history="${d}" style="font-size:10px;padding:4px 10px">${label}</button>`;
+        }).join('');
+
+      nav.querySelectorAll('[data-history]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const dateStr = btn.dataset.history;
+          const historical = loadJobHistory(dateStr);
+          if (historical.length > 0) {
+            allJobs = historical;
+            document.getElementById('filters').style.display = 'flex';
+            renderTable();
+            $progress.style.display = 'block';
+            $progress.style.animation = 'none';
+            $progress.textContent = `Viewing ${historical.length} jobs from ${dateStr}`;
+          }
+          nav.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+        });
+      });
+    }
+
+    // Load history nav on page load
+    renderHistoryNav();
   </script>
 </body>
 </html>
