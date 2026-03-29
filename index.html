@@ -531,6 +531,49 @@
     }
     .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+    /* ── STATUS TRACKER ── */
+    .status-select {
+      padding: 4px 8px;
+      border-radius: 5px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text-muted);
+      outline: none;
+      transition: all 0.15s;
+      appearance: none;
+      -webkit-appearance: none;
+      padding-right: 18px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2364748b'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 5px center;
+    }
+    .status-select:hover { border-color: var(--border-hover); }
+    .status-not-applied { color: var(--text-dim); }
+    .status-applied { color: var(--yellow); border-color: rgba(234,179,8,0.3); background: var(--yellow-bg); }
+    .status-interview { color: var(--green); border-color: rgba(34,197,94,0.3); background: var(--green-bg); }
+    .status-rejected { color: var(--red); border-color: rgba(239,68,68,0.3); background: var(--red-bg); }
+    .status-saved { color: var(--accent); border-color: rgba(99,102,241,0.3); background: var(--accent-glow); }
+
+    .notes-input {
+      width: 100%;
+      padding: 4px 8px;
+      margin-top: 4px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text-muted);
+      font-family: var(--font-body);
+      font-size: 11px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .notes-input:focus { border-color: var(--accent); }
+    .notes-input::placeholder { color: var(--text-dim); }
+
     /* ── FOOTER ── */
     .footer {
       margin-top: 40px;
@@ -579,17 +622,36 @@
         <div class="field-hint">Free at apify.com → Settings → Integrations</div>
       </div>
       <div>
-        <label class="field-label" for="anthropic-key">Anthropic API Key</label>
-        <input type="password" id="anthropic-key" placeholder="sk-ant-..." />
-        <div class="field-hint">Free credits at console.anthropic.com</div>
+        <label class="field-label" for="anthropic-key">Groq API Key</label>
+        <input type="password" id="anthropic-key" placeholder="gsk_..." />
+        <div class="field-hint">Free at console.groq.com → API Keys</div>
       </div>
       <div class="full">
         <label class="field-label" for="roles">Target Roles (comma-separated)</label>
-        <input type="text" id="roles" value="Software Engineer Intern, Backend Engineer Intern, Java Developer Intern" />
+        <input type="text" id="roles" value="Java Software Engineer Intern, Backend Engineer Intern, Software Developer Intern" />
       </div>
       <div>
         <label class="field-label" for="location">Location</label>
         <input type="text" id="location" value="United States" />
+      </div>
+      <div>
+        <label class="field-label" for="exp-level">Experience Level</label>
+        <select id="exp-level" style="width:100%;padding:11px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--font-mono);font-size:13px;outline:none;appearance:none;-webkit-appearance:none;cursor:pointer;">
+          <option value="1">Internship</option>
+          <option value="2">Entry Level</option>
+          <option value="1,2">Internship + Entry Level</option>
+          <option value="">All Levels</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="exclude-companies">Exclude Companies (comma-separated)</label>
+        <input type="text" id="exclude-companies" value="Lensa, Dice, Crossover" />
+        <div class="field-hint">Jobs from these companies will be hidden</div>
+      </div>
+      <div>
+        <label class="field-label" for="require-keywords">Require Keywords (comma-separated)</label>
+        <input type="text" id="require-keywords" value="" placeholder="e.g. Java, Spring Boot, AWS" />
+        <div class="field-hint">Only show jobs mentioning at least one of these</div>
       </div>
       <div>
         <label class="field-label">Resume PDF</label>
@@ -632,6 +694,7 @@
               <th data-sort="location">Location</th>
               <th data-sort="atsScore" class="sorted">ATS Score ↓</th>
               <th>Level</th>
+              <th>Status</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -645,7 +708,7 @@
     </div>
 
     <div class="footer">
-      Resume is parsed locally — it never leaves your browser. ATS scoring via Anthropic API. LinkedIn scraping via Apify free tier.
+      Resume is parsed locally — it never leaves your browser. ATS scoring via Groq (Llama 3.3 70B, free). LinkedIn scraping via Apify.
     </div>
   </div>
 
@@ -802,22 +865,30 @@
     // ═══════════════════════════════════════════════════════════
     // APIFY SCRAPING
     // ═══════════════════════════════════════════════════════════
-    async function scrapeJobs(roles, location, token) {
+    async function scrapeJobs(roles, location, token, expLevel, excludeCompanies, requireKeywords) {
       const jobs = [];
       const seenUrls = new Set();
 
+      // Build company exclusion set (lowercase for comparison)
+      const excludeSet = new Set(
+        excludeCompanies.split(',').map(c => c.trim().toLowerCase()).filter(Boolean)
+      );
+
+      // Build required keywords list (lowercase)
+      const requireList = requireKeywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+
       // Uses curious_coder/linkedin-jobs-scraper ($1/1000 results — free tier covers it)
-      // Input: { urls: [linkedin search URLs], count: number }
-      // Output: [{ title, companyName, location, link, postedAt, description, ... }]
       for (const role of roles) {
         const trimmed = role.trim();
         if (!trimmed) continue;
 
         const kw = encodeURIComponent(trimmed);
         const loc = location ? `&location=${encodeURIComponent(location)}` : '';
+        // f_E = experience level filter: 1=Internship, 2=Entry, 3=Associate, 4=Mid-Senior, 5=Director, 6=Executive
+        const exp = expLevel ? `&f_E=${expLevel}` : '';
         const searchUrls = [
-          `https://www.linkedin.com/jobs/search/?keywords=${kw}${loc}&f_TPR=r86400&start=0`,
-          `https://www.linkedin.com/jobs/search/?keywords=${kw}${loc}&f_TPR=r86400&start=25`,
+          `https://www.linkedin.com/jobs/search/?keywords=${kw}${loc}&f_TPR=r86400${exp}&start=0`,
+          `https://www.linkedin.com/jobs/search/?keywords=${kw}${loc}&f_TPR=r86400${exp}&start=25`,
         ];
 
         try {
@@ -842,17 +913,32 @@
             const url = item.link || item.url || item.applyUrl || '';
             if (!url || seenUrls.has(url)) continue;
             if (!isWithin24h(item.postedAt || item.publishedAt || '')) continue;
+
+            const company = item.companyName || item.company || 'Unknown';
+            const title = item.title || 'Untitled';
+            const desc = item.description || item.descriptionText || item.snippet || '';
+
+            // Exclude blocked companies
+            if (excludeSet.has(company.toLowerCase())) continue;
+
+            // Require at least one keyword if specified
+            if (requireList.length > 0) {
+              const searchText = `${title} ${desc} ${company}`.toLowerCase();
+              const hasKeyword = requireList.some(k => searchText.includes(k));
+              if (!hasKeyword) continue;
+            }
+
             seenUrls.add(url);
 
             jobs.push({
               id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              title: item.title || 'Untitled',
-              company: item.companyName || item.company || 'Unknown',
+              title,
+              company,
               location: item.location || item.formattedLocation || 'N/A',
               url,
               postedAt: item.postedAt || item.publishedAt || 'Recently',
-              description: item.description || item.descriptionText || item.snippet || '',
-              experienceLevel: parseExpLevel(item.description || ''),
+              description: desc,
+              experienceLevel: parseExpLevel(desc),
               searchRole: trimmed,
               atsScore: null,
               matchTier: null,
@@ -893,26 +979,26 @@
     // ANTHROPIC API
     // ═══════════════════════════════════════════════════════════
     async function callClaude(prompt, apiKey) {
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      // Using Groq API (OpenAI-compatible) with Llama 3.3 70B
+      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
+          'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1024,
+          model: 'llama-3.3-70b-versatile',
           messages: [{ role: 'user', content: prompt }],
+          temperature: 0.3,
+          max_tokens: 1024,
         }),
       });
       if (!resp.ok) {
         const err = await resp.text();
-        throw new Error(`Claude API ${resp.status}: ${err}`);
+        throw new Error(`Groq API ${resp.status}: ${err}`);
       }
       const data = await resp.json();
-      return (data.content || []).map(b => b.text || '').join('');
+      return data.choices?.[0]?.message?.content || '';
     }
 
     async function scoreJob(job, resumeTxt, apiKey) {
@@ -941,7 +1027,18 @@ Return ONLY valid JSON, no markdown:
         return JSON.parse(clean);
       } catch (e) {
         console.error('Score error:', e);
-        return { ats_score: 0, match_tier: 'Low', top_missing_keywords: [] };
+        // Surface the first API error to the user so they can debug
+        if (!window._atsErrorShown) {
+          window._atsErrorShown = true;
+          const $p = document.getElementById('progress');
+          if ($p) {
+            $p.textContent = `⚠ ATS scoring error: ${e.message.slice(0, 150)}. Check your Groq API key at console.groq.com → API Keys.`;
+            $p.style.background = 'var(--red-bg)';
+            $p.style.borderColor = 'rgba(239,68,68,0.3)';
+            $p.style.color = 'var(--red)';
+          }
+        }
+        return { ats_score: 0, match_tier: 'Error', top_missing_keywords: [] };
       }
     }
 
@@ -974,6 +1071,33 @@ Return ONLY valid JSON, no markdown:
         console.error('Optimize error:', e);
         return null;
       }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // APPLICATION TRACKER (persists to localStorage)
+    // ═══════════════════════════════════════════════════════════
+    function getTracker() {
+      try { return JSON.parse(localStorage.getItem('jha_tracker') || '{}'); } catch { return {}; }
+    }
+    function saveTracker(tracker) {
+      localStorage.setItem('jha_tracker', JSON.stringify(tracker));
+    }
+    function getJobStatus(jobUrl) {
+      const t = getTracker();
+      return t[jobUrl] || { status: 'not-applied', notes: '', date: '' };
+    }
+    function setJobStatus(jobUrl, status) {
+      const t = getTracker();
+      if (!t[jobUrl]) t[jobUrl] = { status: 'not-applied', notes: '', date: '' };
+      t[jobUrl].status = status;
+      if (status === 'applied' && !t[jobUrl].date) t[jobUrl].date = new Date().toLocaleDateString();
+      saveTracker(t);
+    }
+    function setJobNotes(jobUrl, notes) {
+      const t = getTracker();
+      if (!t[jobUrl]) t[jobUrl] = { status: 'not-applied', notes: '', date: '' };
+      t[jobUrl].notes = notes;
+      saveTracker(t);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1012,7 +1136,10 @@ Return ONLY valid JSON, no markdown:
       $emptyState.style.display = 'none';
       $resultsWrap.style.display = 'block';
 
-      $resultsBody.innerHTML = filtered.map(job => `
+      $resultsBody.innerHTML = filtered.map(job => {
+        const tracked = getJobStatus(job.url);
+        const statusClass = `status-${tracked.status}`;
+        return `
         <tr data-id="${job.id}">
           <td style="max-width:260px">
             <div class="job-title">${esc(job.title)}</div>
@@ -1028,6 +1155,17 @@ Return ONLY valid JSON, no markdown:
               : '<span class="scoring-text">scoring...</span>'}
           </td>
           <td><span class="level-badge">${esc(job.experienceLevel)}</span></td>
+          <td style="min-width:130px">
+            <select class="status-select ${statusClass}" data-url="${esc(job.url)}">
+              <option value="not-applied" ${tracked.status === 'not-applied' ? 'selected' : ''}>—</option>
+              <option value="saved" ${tracked.status === 'saved' ? 'selected' : ''}>⭐ Saved</option>
+              <option value="applied" ${tracked.status === 'applied' ? 'selected' : ''}>✓ Applied</option>
+              <option value="interview" ${tracked.status === 'interview' ? 'selected' : ''}>📞 Interview</option>
+              <option value="rejected" ${tracked.status === 'rejected' ? 'selected' : ''}>✗ Rejected</option>
+            </select>
+            ${tracked.date ? `<div style="font-size:9px;color:var(--text-dim);margin-top:2px;font-family:var(--font-mono)">${tracked.date}</div>` : ''}
+            <input class="notes-input" data-url="${esc(job.url)}" placeholder="Notes..." value="${esc(tracked.notes)}" />
+          </td>
           <td>
             <div class="actions">
               ${job.url ? `<a href="${esc(job.url)}" target="_blank" rel="noopener" class="btn-small btn-apply">Apply →</a>` : ''}
@@ -1036,12 +1174,33 @@ Return ONLY valid JSON, no markdown:
               </button>
             </div>
           </td>
-        </tr>
-      `).join('');
+        </tr>`;
+      }).join('');
 
       // Attach optimize listeners
       $resultsBody.querySelectorAll('.btn-optimize').forEach(btn => {
         btn.addEventListener('click', () => handleOptimizeClick(btn.dataset.id));
+      });
+
+      // Attach status change listeners
+      $resultsBody.querySelectorAll('.status-select').forEach(sel => {
+        sel.addEventListener('change', (e) => {
+          const url = e.target.dataset.url;
+          const status = e.target.value;
+          setJobStatus(url, status);
+          // Update class for coloring
+          e.target.className = `status-select status-${status}`;
+        });
+      });
+
+      // Attach notes listeners (save on blur)
+      $resultsBody.querySelectorAll('.notes-input').forEach(input => {
+        input.addEventListener('blur', (e) => {
+          setJobNotes(e.target.dataset.url, e.target.value);
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.target.blur(); }
+        });
       });
     }
 
@@ -1200,6 +1359,7 @@ Return ONLY valid JSON, no markdown:
     $startBtn.addEventListener('click', async () => {
       if (isRunning) return;
       isRunning = true;
+      window._atsErrorShown = false;
       checkReady();
       saveTokens();
 
@@ -1207,16 +1367,22 @@ Return ONLY valid JSON, no markdown:
       const apifyToken = $apify.value;
       const roleList = $roles.value.split(',').map(r => r.trim()).filter(Boolean);
       const loc = $location.value.trim();
+      const expLevel = document.getElementById('exp-level').value;
+      const excludeCompanies = document.getElementById('exclude-companies').value;
+      const requireKeywords = document.getElementById('require-keywords').value;
 
       // Scrape phase
       $progress.style.display = 'block';
-      $progress.textContent = `Scraping LinkedIn for ${roleList.length} role(s)... This takes 1-4 minutes per role.`;
+      $progress.style.background = 'var(--accent-glow)';
+      $progress.style.borderColor = 'rgba(99,102,241,0.2)';
+      $progress.style.color = 'var(--accent)';
+      $progress.textContent = `Scraping LinkedIn for ${roleList.length} role(s) (Internship filter active)... This takes 1-4 minutes per role.`;
       $filters.style.display = 'none';
       $resultsWrap.style.display = 'none';
       $emptyState.style.display = 'none';
 
       try {
-        allJobs = await scrapeJobs(roleList, loc, apifyToken);
+        allJobs = await scrapeJobs(roleList, loc, apifyToken, expLevel, excludeCompanies, requireKeywords);
 
         if (allJobs.length === 0) {
           $progress.textContent = 'No jobs found. This usually means: (1) You need to "Try" the actor first in Apify Console, or (2) Check your token, or (3) Try broader roles like "Software Engineer".';
@@ -1231,7 +1397,7 @@ Return ONLY valid JSON, no markdown:
         renderTable();
 
         // Score in batches of 5
-        const BATCH = 5;
+        const BATCH = 3; // Groq free tier: 30 RPM, 12K tokens/min
         for (let i = 0; i < allJobs.length; i += BATCH) {
           const batch = allJobs.slice(i, i + BATCH);
           $progress.textContent = `Scoring jobs ${i + 1}–${Math.min(i + BATCH, allJobs.length)} of ${allJobs.length}...`;
@@ -1250,7 +1416,7 @@ Return ONLY valid JSON, no markdown:
           renderTable();
 
           if (i + BATCH < allJobs.length) {
-            await new Promise(r => setTimeout(r, 1800));
+            await new Promise(r => setTimeout(r, 12000));
           }
         }
 
